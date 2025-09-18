@@ -26,7 +26,7 @@ TSTORE="${TSTORE:-local}"
 TEMPLATE="debian-12-standard_12.7-1_amd64.tar.zst"
 
 # Where to fetch the in-CT installer from (your repo raw URL)
-INSTALL_URL="${INSTALL_URL:-https://raw.githubusercontent.com/<youruser>/proxmox-companion-lxc/main/proxmox/install/companion_install.sh}"
+INSTALL_URL="${INSTALL_URL:-https://raw.githubusercontent.com/glabutis/proxmox-companion-lxc/main/proxmox/install/companion_install.sh}"
 
 # -------- Helpers ----------
 msg() { echo -e "[$(date +%T)] $*"; }
@@ -47,12 +47,42 @@ fi
 # Internet check
 curl -fsSL https://1.1.1.1 >/dev/null 2>&1 || fail "No internet access from host."
 
-# Ensure template
-msg "Ensuring Debian template exists in ${TSTORE} ..."
+# ----- Template auto-select (no hard-coded subversion) -----
+DEBIAN_SERIES="${DEBIAN_SERIES:-12}"   # set to 12 (default) or 13 if you want bookworm->trixie later
+ARCH="${ARCH:-amd64}"
+TSTORE="${TSTORE:-local}"              # template storage
+
+pick_template() {
+  # Get the newest "debian-<series>-standard_*_<arch>.tar.(zst|gz)" from pveam
+  local series="$1" arch="$2"
+  local latest
+  latest="$(pveam available \
+    | awk -v s="$series" -v a="$arch" '
+        $2 ~ ("^debian-" s "-standard_[0-9.]+-[0-9]_" a "\\.tar\\.(zst|gz)$") { print $2 }' \
+    | sort -V \
+    | tail -n 1)"
+
+  if [[ -z "$latest" ]]; then
+    echo "ERROR: No Debian ${series} standard template found for ${arch} in pveam available." >&2
+    echo "Run: pveam update && pveam available | grep debian-${series}-standard" >&2
+    return 1
+  fi
+  echo "$latest"
+}
+
+# Resolve the template name once at runtime (unless TEMPLATE is pre-set by env)
+if [[ -z "${TEMPLATE:-}" ]]; then
+  TEMPLATE="$(pick_template "$DEBIAN_SERIES" "$ARCH")" || exit 1
+fi
+
+echo "[+] Ensuring Debian template exists in ${TSTORE} ..."
+pveam update
 if ! pveam list "$TSTORE" | grep -q "$TEMPLATE"; then
-  pveam update
   pveam download "$TSTORE" "$TEMPLATE"
 fi
+
+# When creating the CT, remember to reference it like this:
+# pct create "$CTID" "${TSTORE}:vztmpl/${TEMPLATE}"  ...
 
 # Network config
 NET0="name=eth0,bridge=${BRIDGE}"
