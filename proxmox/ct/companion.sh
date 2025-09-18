@@ -47,29 +47,64 @@ fi
 # Internet check
 curl -fsSL https://1.1.1.1 >/dev/null 2>&1 || fail "No internet access from host."
 
-# ----- Template auto-select (no hard-coded subversion) -----
-DEBIAN_SERIES="${DEBIAN_SERIES:-12}"   # set to 12 (default) or 13 if you want bookworm->trixie later
+# ----- Template auto-select (robust) -----
+DEBIAN_SERIES="${DEBIAN_SERIES:-12}"   # 12 = Debian 12 (bookworm)
 ARCH="${ARCH:-amd64}"
-TSTORE="${TSTORE:-local}"              # template storage
+TSTORE="${TSTORE:-local}"              # must support content type: vztmpl
+
+require_storage_vztmpl() {
+  # Make sure TSTORE exists and supports templates
+  if ! pvesm status | awk '{print $1}' | grep -qx "$TSTORE"; then
+    echo "ERROR: storage '$TSTORE' not found. See: Datacenter -> Storage." >&2
+    exit 1
+  fi
+  if ! pvesm status --verbose 2>/dev/null | awk -v s="$TSTORE" '
+      $1==s && $0 ~ /content:.*(^|,)(vztmpl)(,|$)/ {found=1} END{exit(found?0:1)}'
+  then
+    echo "ERROR: storage '$TSTORE' does not allow content type 'vztmpl' (templates)." >&2
+    echo "       Enable it in Datacenter -> Storage -> $TSTORE -> Content -> check 'VZDump template'." >&2
+    exit 1
+  fi
+}
 
 pick_template() {
-  # Get the newest "debian-<series>-standard_*_<arch>.tar.(zst|gz)" from pveam
   local series="$1" arch="$2"
+  # Extract the filename from the whole line regardless of columns.
+  # Example line: "system  debian-12-standard_12.6-1_amd64.tar.zst"
   local latest
   latest="$(pveam available \
     | awk -v s="$series" -v a="$arch" '
-        $2 ~ ("^debian-" s "-standard_[0-9.]+-[0-9]_" a "\\.tar\\.(zst|gz)$") { print $2 }' \
-    | sort -V \
-    | tail -n 1)"
+        {
+          match($0, ("debian-" s "-standard_[0-9.]+-[0-9]_" a "\\.tar\\.(zst|gz)"))
+          if (RSTART) print substr($0, RSTART, RLENGTH)
+        }' \
+    | sort -V | tail -n1)"
 
   if [[ -z "$latest" ]]; then
-    echo "ERROR: No Debian ${series} standard template found for ${arch} in pveam available." >&2
-    echo "Run: pveam update && pveam available | grep debian-${series}-standard" >&2
-    return 1
+    echo "ERROR: No Debian ${series} standard template found for ${arch}." >&2
+    echo "       Try: pveam update && pveam available | grep -E \"debian-${series}-standard_.*_${arch}\\.tar\"" >&2
+    exit 1
   fi
   echo "$latest"
 }
 
+require_storage_vztmpl
+
+echo "[+] Updating template catalog ..."
+pveam update
+
+if [[ -z "${TEMPLATE:-}" ]]; then
+  TEMPLATE="$(pick_template "$DEBIAN_SERIES" "$ARCH")"
+fi
+
+echo "[+] Using template: ${TEMPLATE}"
+echo "[+] Ensuring template exists in ${TSTORE} ..."
+if ! pveam list "$TSTORE" | awk '{print $2}' | grep -qx "$TEMPLATE"; then
+  pveam download "$TSTORE" "$TEMPLATE"
+fi
+
+# Later in pct create keep:
+# pct create "$CTID" "${TSTORE}:vztmpl/${TEMPLATE}" ...
 # Resolve the template name once at runtime (unless TEMPLATE is pre-set by env)
 if [[ -z "${TEMPLATE:-}" ]]; then
   TEMPLATE="$(pick_template "$DEBIAN_SERIES" "$ARCH")" || exit 1
